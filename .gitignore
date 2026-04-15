@@ -1,0 +1,34 @@
+# Build and binaries
+*.o
+*.bin
+*.elf
+*.iso
+*.img
+*.qcow2
+
+# Folders
+build/
+obj/
+dist/
+isodir/
+*.dSYM/
+
+# macOS junk
+.DS_Store
+.DS_Store?
+._*
+.Trashes
+
+# IDE
+.vscode/
+.idea/
+*.save
+*.log
+*.tmp
+EOF 
+EOF 
+
+
+
+
+
