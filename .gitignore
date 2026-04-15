@@ -25,10 +25,10 @@ isodir/
 *.save
 *.log
 *.tmp
-EOF 
-EOF 
 
-
-
-
-
+# Kernel specific
+*.mod*
+*.cmd
+.tmp_versions/
+modules.order
+Module.symvers
