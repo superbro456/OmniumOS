@@ -8,10 +8,10 @@
 // ===== Memory configuration =====
 #define MEM_SIZE            (1024 * 1024 * 1024)  // 1 GB RAM
 #define ZONE_KERNEL_SIZE    (128 * 1024 * 1024)   // 128 MB
-#define ZONE_APP_MIN        (256 * 1024 * 1024)   // 256 MB минимально для приложений
-#define ZONE_APP_MAX        (512 * 1024 * 1024)   // 512 MB максимально для приложений
-#define ZONE_SERVICE_MIN    (32  * 1024 * 1024)   // 32 MB минимально для сервисов
-#define ZONE_SERVICE_MAX    (128 * 1024 * 1024)   // 128 MB максимально для сервисов
+#define ZONE_APP_MIN        (256 * 1024 * 1024)   // 256 MB 
+#define ZONE_APP_MAX        (512 * 1024 * 1024)   // 512 MB 
+#define ZONE_SERVICE_MIN    (32  * 1024 * 1024)   // 32 MB 
+#define ZONE_SERVICE_MAX    (128 * 1024 * 1024)   // 128 MB 
 
 typedef struct Allocator {
     uint8_t* start;
