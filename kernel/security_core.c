@@ -22,7 +22,18 @@ void security_core_init() {
 }
 
 // ------------------------- Установка уровня процесса -------------------------
+static process_security_t* find_process(uint32_t pid) {
+    if (pid == 0) return NULL;   // 0 означает пустую запись
+    for (int i = 0; i < MAX_PROCESSES; i++)
+        if (process_table[i].pid == pid) return &process_table[i];
+    return NULL;
+}
+
 void security_set_process_level(uint32_t pid, security_level_t level) {
+    // Повторный вызов обновляет запись, а не создаёт дубликат
+    process_security_t* p = find_process(pid);
+    if (p) { p->level = level; return; }
+    if (pid == 0) return;
     for (int i = 0; i < MAX_PROCESSES; i++) {
         if (process_table[i].pid == 0) {
             process_table[i].pid = pid;
@@ -30,25 +41,21 @@ void security_set_process_level(uint32_t pid, security_level_t level) {
             return;
         }
     }
+    kprint("[Security] Process table full\n");
 }
 
 // ------------------------- Установка whitelist для процесса -------------------------
 void security_set_whitelist(uint32_t pid, uint8_t* syscalls, int count) {
-    for (int i = 0; i < MAX_PROCESSES; i++) {
-        if (process_table[i].pid == pid) {
-            for (int j = 0; j < MAX_SYSCALLS && j < count; j++)
-                process_table[i].whitelist[j] = syscalls[j];
-            return;
-        }
-    }
+    process_security_t* p = find_process(pid);
+    if (!p) return;
+    for (int j = 0; j < MAX_SYSCALLS && j < count; j++)
+        p->whitelist[j] = syscalls[j];
 }
 
 // ------------------------- Получение уровня процесса -------------------------
 security_level_t security_get_process_level(uint32_t pid) {
-    for (int i = 0; i < MAX_PROCESSES; i++) {
-        if (process_table[i].pid == pid) return process_table[i].level;
-    }
-    return SEC_LEVEL_USER;
+    process_security_t* p = find_process(pid);
+    return p ? p->level : SEC_LEVEL_USER;
 }
 
 // ------------------------- Карантин процесса -------------------------
@@ -65,9 +72,7 @@ void quarantine_process(uint32_t pid) {
 
 // ------------------------- Проверка syscall -------------------------
 int security_check_syscall(uint32_t syscall_id, uint32_t pid) {
-    process_security_t *proc = NULL;
-    for (int i = 0; i < MAX_PROCESSES; i++)
-        if (process_table[i].pid == pid) proc = &process_table[i];
+    process_security_t *proc = find_process(pid);
 
     if (!proc) return 0; // неизвестный процесс → запрещено
 

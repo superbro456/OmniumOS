@@ -1,34 +1,11 @@
-# Build and binaries
 *.o
-*.bin
 *.elf
 *.iso
-*.img
-*.qcow2
-
-# Folders
-build/
-obj/
-dist/
 isodir/
-*.dSYM/
-
-# macOS junk
+__pycache__/
+.pytest_cache/
+*.pyc
 .DS_Store
-.DS_Store?
-._*
-.Trashes
-
-# IDE
-.vscode/
-.idea/
-*.save
-*.log
-*.tmp
-
-# Kernel specific
-*.mod*
-*.cmd
-.tmp_versions/
-modules.order
-Module.symvers
+serial.log
+tests/host/test_scheduler
+kernel/ap_trampoline.bin

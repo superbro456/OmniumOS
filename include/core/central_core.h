@@ -6,10 +6,11 @@
 #include <stdbool.h>
 
 // === Основная точка входа ядра ===
-void kernel_main(void);
+#include "multiboot.h"
+void kernel_main(uint32_t magic, multiboot_info_t* mbi);
 
-// === AP точка входа ===
-void ap_main(void);
+// === AP точка входа (вызывается из trampoline) ===
+void ap_entry(uint32_t index);
 
 // === BSP helpers ===
 void start_all_aps(void);

@@ -8,5 +8,6 @@ typedef struct {
     void* payload;
 } flexipc_msg_t;
 
-void flexipc_send(flexipc_msg_t* msg);
+/* 1 — сообщение поставлено, 0 — очередь полна */
+int flexipc_send(const flexipc_msg_t* msg);
 int flexipc_receive(flexipc_msg_t* msg);

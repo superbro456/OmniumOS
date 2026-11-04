@@ -49,5 +49,9 @@ uint32_t lapic_read(uint32_t reg);
 void lapic_enable(void);
 void lapic_send_ipi(uint32_t apic_id, uint32_t value);
 uint32_t lapic_get_id(void);
+void lapic_eoi(void);
+/* Отправить фиксированное прерывание vector всем ядрам, кроме текущего. */
+void lapic_send_ipi_all_others(uint32_t vector);
+void lapic_mark_ready(void);  /* AP запущены, можно слать «тики» */
 
 #endif /* LAPIC_H */

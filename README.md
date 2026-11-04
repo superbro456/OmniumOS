@@ -209,7 +209,34 @@ Security Core управляет **6 уровнями защиты**:
 
 ---
 
-## Сборка
+## Сборка и запуск
+
+Нужны `nasm`, `grub-mkrescue` (пакеты `grub-pc-bin`, `xorriso`, `mtools`) и `qemu-system-i386`.
 
 ```bash
-make
+make                 # собрать omnium.iso (кросс-компилятор i686-elf-gcc)
+make CROSS=          # то же самое обычным gcc на Linux
+make run             # запустить в QEMU, вывод ядра идёт в терминал
+make run SMP=4       # 4 ядра
+make test CROSS=     # загрузка без окна + проверка лога (serial.log)
+make unittest        # проверка планировщика на обычном компьютере
+```
+
+Что видно при загрузке: проверка зон памяти, тест карантина Security Core,
+запуск второстепенных ядер (AP) и тики таймера.
+
+## Эмулятор OmniumCPU и язык Flang
+
+Папка [`emulator`](emulator) — эмулятор процессора OmniumCPU на Python и компилятор языка Flang.
+
+```bash
+cd emulator
+python3 main.py              # скомпилировать и запустить test.fx
+python3 -m pytest tests      # тесты компилятора и эмулятора (pip install pytest)
+```
+
+Свою программу можно запустить, поменяв `SOURCE_FILES` в `main.py`.
+
+## Документация
+
+[`docs/OmniumX_OmniumOS.md`](docs/OmniumX_OmniumOS.md) — полное описание архитектуры процессора OmniumX и Omnium OS.

@@ -18,7 +18,8 @@ uint32_t lapic_read(uint32_t reg) {
 
 void lapic_enable(void) {
     /* Set bit 8 in Spurious Interrupt Vector Register to enable LAPIC */
-    lapic_write(LAPIC_SVR, lapic_read(LAPIC_SVR) | 0x100u);
+    /* + вектор ложного прерывания 0xFF */
+    lapic_write(LAPIC_SVR, (lapic_read(LAPIC_SVR) & ~0xFFu) | 0x100u | 0xFFu);
 }
 
 /* wait until Delivery Status (bit 12) cleared */
@@ -38,4 +39,23 @@ void lapic_send_ipi(uint32_t apic_id, uint32_t value) {
 
 uint32_t lapic_get_id(void) {
     return (lapic_read(LAPIC_ID) >> 24) & 0xFFu;
+}
+
+void lapic_mark_ready(void);
+
+void lapic_eoi(void) {
+    lapic_write(LAPIC_EOI, 0);
+}
+
+static volatile int lapic_ready = 0;
+
+void lapic_send_ipi_all_others(uint32_t vector) {
+    if (!lapic_ready) return;
+    lapic_write(LAPIC_ICR_HIGH, 0);
+    lapic_write(LAPIC_ICR_LOW, ICR_SHORTHAND_OTHERS | ICR_LEVEL_ASSERT | ICR_VECTOR(vector));
+    icr_wait_done();
+}
+
+void lapic_mark_ready(void) {
+    lapic_ready = 1;
 }

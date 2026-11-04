@@ -3,12 +3,14 @@
 
 #include <stdint.h>
 
-// ------------------ VGA ------------------
-void kprint(const char* str);
+// ------------------ Вывод ------------------
+void kprint(const char* str);        // экран + COM1
 void kclear_screen(void);
+void serial_init(void);
+void serial_print(const char* str);  // только COM1
 
 // ------------------ Паника ------------------
-void panic(const char* msg);
+void panic(const char* msg) __attribute__((noreturn));
 
 // ------------------ Преобразование чисел ------------------
 void u32_to_dec(uint32_t value, char* buffer);

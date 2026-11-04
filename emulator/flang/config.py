@@ -1,0 +1,2 @@
+# Режим работы: INTERPRETER / COMPILE
+MODE = "COMPILE"

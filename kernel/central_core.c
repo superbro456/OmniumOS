@@ -17,80 +17,68 @@
 #include "parent_modules/parent_module4.h"
 #include "kernel_utils.h"
 #include "spinlock.h"
+#include "arch.h"
+#include "lapic.h"
+#include "multiboot.h"
 
-// ---------------- Multiboot Header ----------------
-__attribute__((section(".multiboot"), used, aligned(4)))
-const uint32_t multiboot_header[] = {
-    0x1BADB002,
-    0x00,
-    -(0x1BADB002 + 0x00)
-};
+// Заголовок Multiboot теперь в boot/boot.asm, точка входа _start.
 
 // ---------------- Глобальные переменные ----------------
 volatile int system_initialized = 0;
 
-// ---------------- Serial output ----------------
-static inline void outb(uint16_t port, uint8_t val) { __asm__ volatile ("outb %0, %1" : : "a"(val), "Nd"(port)); }
-static inline uint8_t inb(uint16_t port) { uint8_t ret; __asm__ volatile ("inb %1, %0" : "=a"(ret) : "d"(port)); return ret; }
-
-void serial_init(void) {
-    outb(0x3F8 + 1, 0x00); outb(0x3F8 + 3, 0x80);
-    outb(0x3F8 + 0, 0x03); outb(0x3F8 + 1, 0x00);
-    outb(0x3F8 + 3, 0x03); outb(0x3F8 + 2, 0xC7);
-    outb(0x3F8 + 4, 0x0B);
-}
-int serial_is_transmit_empty(void) { return (inb(0x3F8 + 5) & 0x20) != 0; }
-void serial_write(char c) { while (!serial_is_transmit_empty()) __asm__ volatile("pause"); outb(0x3F8, (uint8_t)c); }
-
-// ---------------- Spinlock for serial ----------------
-static spinlock_t serial_lock = {0};
-void serial_print(const char* str) {
-    spinlock_acquire(&serial_lock);
-    while (*str) {
-        if (*str == '\n') serial_write('\r');
-        serial_write(*str++);
-    }
-    spinlock_release(&serial_lock);
-}
-
 // ---------------- CPU detection ----------------
+// CPUID.1 EBX[23:16] — сколько логических ядер в корпусе. Это приближение:
+// точный список ядер даёт таблица ACPI MADT (TODO). Лишние попытки запуска
+// просто не получат ответа и будут пропущены.
 static uint32_t get_cpu_count(void) {
-    uint32_t eax=0, ebx=0, ecx=0, edx=0;
-    __asm__ volatile(
-        "mov $1, %%eax\n\t"
-        "cpuid\n\t"
-        : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
-        :
-        : "memory"
-    );
-    return (ebx >> 16) & 0xFF;
+    uint32_t eax, ebx, ecx, edx;
+    __asm__ volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(1));
+    uint32_t n = (edx & (1u << 28)) ? (ebx >> 16) & 0xFF : 1;
+    if (n == 0) n = 1;
+    if (n > SMP_MAX_CPUS) n = SMP_MAX_CPUS;
+    return n;
+}
+
+static void print_num(const char* before, uint32_t v, const char* after) {
+    char buf[12];
+    u32_to_dec(v, buf);
+    kprint(before);
+    kprint(buf);
+    kprint(after);
+}
+
+static void run_plants(void) {
+    flexipc_msg_t msg;
+    while (flexipc_receive(&msg)) {
+        switch (msg.dst) {
+            case 1: plant1_command(msg.cmd, msg.payload); break;
+            case 2: plant2_command(msg.cmd, msg.payload); break;
+            case 3: plant3_command(msg.cmd, msg.payload); break;
+            case 4: plant4_command(msg.cmd, msg.payload); break;
+        }
+    }
+    plant1_update();
+    plant2_update();
+    plant3_update();
+    plant4_update();
 }
 
 // ---------------- AP main ----------------
-void ap_main(void) {
+// Сюда приходит каждое второстепенное ядро из trampoline, уже со своим стеком.
+void ap_entry(uint32_t index) {
+    gdt_init();
+    idt_load();
+    lapic_enable();
+    __atomic_add_fetch(&smp_cpus_online, 1, __ATOMIC_SEQ_CST);
+
+    print_num("AP ", index, " started (APIC ID ");
+    print_num("", cpu_id(), ").\n");
+
     while (!system_initialized) __asm__ volatile("pause");
-
-    char buf[12];
-    u32_to_dec((uint32_t)cpu_id(), buf);
-    serial_print("AP ");
-    serial_print(buf);
-    serial_print(" started.\n");
-
+    cpu_sti();
     for (;;) {
-        flexipc_msg_t msg;
-        while(flexipc_receive(&msg)) {
-            switch(msg.dst) {
-                case 1: plant1_command(msg.cmd,msg.payload); break;
-                case 2: plant2_command(msg.cmd,msg.payload); break;
-                case 3: plant3_command(msg.cmd,msg.payload); break;
-                case 4: plant4_command(msg.cmd,msg.payload); break;
-            }
-        }
-        plant1_update();
-        plant2_update();
-        plant3_update();
-        plant4_update();
-        __asm__ volatile("hlt");
+        run_plants();
+        cpu_halt();          // проснётся от IPI-тика BSP
     }
 }
 
@@ -98,28 +86,42 @@ void ap_main(void) {
 void start_all_aps(void) {
     uint32_t bsp_id = cpu_id();
     uint32_t cpu_count = get_cpu_count();
-    for (uint32_t i=0;i<cpu_count;i++)
-        if (i!=bsp_id) start_ap(i);
+    uint32_t index = 1;
+    for (uint32_t id = 0; id < cpu_count; id++) {
+        if (id == bsp_id) continue;
+        if (start_ap(id, index)) index++;
+        else print_num("[SMP] CPU ", id, " did not respond\n");
+    }
+    print_num("[SMP] CPUs online: ", smp_cpus_online, "\n");
 }
 
 // ---------------- Kernel main ----------------
-void kernel_main(void) {
-    if (cpu_id() != 0) { ap_main(); return; }
-
+void kernel_main(uint32_t magic, multiboot_info_t* mbi) {
     serial_init();
-    serial_print("BSP started.\n");
-    kclear_screen();  
+    kclear_screen();
     kprint("Welcome to Omnium OS!\n");
 
+    if (magic != MULTIBOOT_BOOTLOADER_MAGIC)
+        panic("not loaded by a Multiboot bootloader");
+
+    gdt_init();
+    idt_init();
+    idt_load();
+    pic_init();
+    pit_init(TIMER_HZ);
+    lapic_enable();
+    kprint("[Arch] GDT, IDT, PIC, PIT ready.\n");
+
     // ---------------- Initialize cores ----------------
-    memory_init();
+    uint32_t mem_kb = (mbi->flags & MULTIBOOT_INFO_MEMORY) ? mbi->mem_upper : 0;
+    if (mem_kb == 0) panic("bootloader did not report memory size");
+    memory_init((uint64_t)mem_kb * 1024);
     memory_test();
 
-    serial_print("[ProcessCore] Initialization started...\n");
     process_core_init();
-    serial_print("[ProcessCore] Initialization completed.\n");
+    kprint("[ProcessCore] Initialized.\n");
 
-    security_core_init();   // Security Core
+    security_core_init();
     metrics_init();
     optimize_init();
     ai_init();
@@ -138,31 +140,26 @@ void kernel_main(void) {
     whitelist[0] = 1;  // Разрешаем syscall 0
     security_set_whitelist(test_pid, whitelist, MAX_SYSCALLS);
 
-    kprint("Testing forbidden syscall...\n");
-    security_check_syscall(1, test_pid);  // ← syscall 1 запрещён → должен вызвать карантин
+    kprint("Testing allowed syscall 0... ");
+    kprint(security_check_syscall(0, test_pid) ? "allowed\n" : "DENIED (bug)\n");
+    kprint("Testing forbidden syscall 1...\n");
+    security_check_syscall(1, test_pid);  // запрещён → карантин
 
     // ---------------- Start APs ----------------
-    system_initialized = 1;
     start_all_aps();
+    lapic_mark_ready();
+    system_initialized = 1;
 
     // ---------------- Main loop BSP ----------------
-    static spinlock_t ipc_lock = {0};
+    cpu_sti();   // без этого hlt никогда не проснётся
+    uint32_t next_report = 1;
     for (;;) {
-        flexipc_msg_t msg;
-        while(flexipc_receive(&msg)) {
-            spinlock_acquire(&ipc_lock);
-            switch(msg.dst) {
-                case 1: plant1_command(msg.cmd,msg.payload); break;
-                case 2: plant2_command(msg.cmd,msg.payload); break;
-                case 3: plant3_command(msg.cmd,msg.payload); break;
-                case 4: plant4_command(msg.cmd,msg.payload); break;
-            }
-            spinlock_release(&ipc_lock);
+        run_plants();
+        uint32_t secs = (uint32_t)(timer_ticks / TIMER_HZ);
+        if (secs >= next_report) {     // 1, 2, 3 с, потом раз в минуту
+            print_num("[Timer] uptime ", secs, " s\n");
+            next_report = secs < 3 ? secs + 1 : secs + 60;
         }
-        plant1_update();
-        plant2_update();
-        plant3_update();
-        plant4_update();
-        __asm__ volatile("hlt");
+        cpu_halt();
     }
 }
