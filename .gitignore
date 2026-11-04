@@ -7,3 +7,5 @@ __pycache__/
 *.pyc
 .DS_Store
 serial.log
+tests/host/test_scheduler
+kernel/ap_trampoline.bin

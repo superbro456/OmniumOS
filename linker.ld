@@ -1,43 +1,34 @@
-ENTRY(kernel_main)
+ENTRY(_start)
+OUTPUT_FORMAT(elf32-i386)
 OUTPUT_ARCH(i386)
 
 SECTIONS
 {
-    /* 1) Multiboot header — первый сегмент ELF */
-    .multiboot : {
-        KEEP(*(.multiboot))
-    }
-
-    /* 2) AP trampoline blob — разместим его точно по 0x7000 */
-    . = 0x00007000;              /* <- установить адрес перед blob */
-    .ap_trampoline_blob : ALIGN(0x1000) {
-        PROVIDE(ap_trampoline_blob_start = .);
-        KEEP(*(.ap_trampoline_blob))
-        PROVIDE(ap_trampoline_blob_end = .);
-    }
-
-    /* 3) Базовый адрес ядра (1MB) */
+    /* Ядро грузится с 1 МБ. Заголовок Multiboot должен лежать
+       в первых 8 КБ файла, поэтому он идёт первым. */
     . = 0x00100000;
+    _kernel_start = .;
 
-    /* Kernel code */
-    .text : ALIGN(16) {
+    .text : ALIGN(4096) {
+        KEEP(*(.multiboot))
         *(.text*)
-        *(.gnu.linkonce.t.*)
     }
 
-    /* Read-only data */
-    .rodata : ALIGN(16) {
+    .rodata : ALIGN(4096) {
         *(.rodata*)
     }
 
-    /* Data */
-    .data : ALIGN(16) {
+    .data : ALIGN(4096) {
         *(.data*)
     }
 
-    /* BSS */
-    .bss : ALIGN(16) {
-        *(.bss*)
+    .bss : ALIGN(4096) {
         *(COMMON)
+        *(.bss*)
     }
+
+    . = ALIGN(4096);
+    _kernel_end = .;
+
+    /DISCARD/ : { *(.comment) *(.note*) *(.eh_frame*) }
 }

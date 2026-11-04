@@ -5,11 +5,12 @@
 
 typedef volatile int spinlock_t;
 
-extern volatile uint32_t current_cpu;
+#define SMP_MAX_CPUS 16
 
-uint32_t cpu_id(void);
-void start_ap(uint32_t apic_id);
-void ap_entry(void);
+uint32_t cpu_id(void);                 /* APIC ID текущего ядра */
+int start_ap(uint32_t apic_id, uint32_t index); /* 1 = ядро ответило */
+extern volatile uint32_t smp_cpus_online;
+
 void spinlock_acquire(spinlock_t *lock);
 void spinlock_release(spinlock_t *lock);
 
