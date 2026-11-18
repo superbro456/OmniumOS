@@ -367,7 +367,13 @@ void gx_wake(gx_cell_t *c) {
     }
     if (c->state == CELL_WAITING) {
         c->state = CELL_READY;
-        rq_push(s, c);
+        /* проснувшаяся клетка встаёт в начало очереди: она ждала события
+           (сообщения, таймера) и обычно быстро снова уснёт — так ответы
+           не стоят в очереди за занятыми клетками */
+        c->next = s->ready_head;
+        s->ready_head = c;
+        if (!s->ready_tail) s->ready_tail = c;
+        s->nready++;
         woke = 1;
     }
     spinlock_release(&s->lock);

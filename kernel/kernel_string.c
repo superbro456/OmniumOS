@@ -1,15 +1,21 @@
 #include "kernel_string.h"
+#include <stdint.h>
 
+/* rep movs/stos: процессор копирует сам, крупными кусками (раньше — по байту) */
 void* kmemcpy(void* dst, const void* src, size_t n) {
-    unsigned char* d = dst;
-    const unsigned char* s = src;
-    while (n--) *d++ = *s++;
+    void *d = dst;
+    size_t words = n / 4, rest = n % 4;
+    __asm__ volatile("rep movsl" : "+D"(d), "+S"(src), "+c"(words) : : "memory");
+    __asm__ volatile("rep movsb" : "+D"(d), "+S"(src), "+c"(rest) : : "memory");
     return dst;
 }
 
 void* kmemset(void* dst, int c, size_t n) {
-    unsigned char* d = dst;
-    while (n--) *d++ = (unsigned char)c;
+    void *d = dst;
+    uint32_t v = (uint8_t)c * 0x01010101u;
+    size_t words = n / 4, rest = n % 4;
+    __asm__ volatile("rep stosl" : "+D"(d), "+c"(words) : "a"(v) : "memory");
+    __asm__ volatile("rep stosb" : "+D"(d), "+c"(rest) : "a"(v) : "memory");
     return dst;
 }
 
