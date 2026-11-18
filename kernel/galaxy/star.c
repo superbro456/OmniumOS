@@ -29,8 +29,19 @@ typedef struct {
     volatile int lit;            /* звезда зажглась */
     volatile uint64_t last_busy; /* когда последний раз работала клетка */
     uint32_t switches;
+    volatile int nready;         /* сколько клеток ждут в очереди */
+    uint32_t moved_in, moved_out;/* сколько клеток приняла и отдала */
     spinlock_t lock;
 } star_t;
+
+/* ---------------- танец звёзд ----------------
+ * Раз в BALANCE_MS каждая звезда смотрит на загрузку остальных. Если у самой
+ * тяжёлой хотя бы на 2 клетки больше, звезда забирает у неё ОДНУ готовую
+ * клетку. Так планеты переходят плавно, по одной, а не толпой.
+ * Только что перешедшая клетка отдыхает REST_MS: никакого пинг-понга.
+ * Клетки, привязанные к звезде (драйверы, замеры), не двигаются. */
+#define BALANCE_MS 10
+#define REST_MS    50
 
 static star_t stars[GX_MAX_STARS];
 static int8_t apic_to_star[256];
@@ -123,6 +134,7 @@ static void rq_push(star_t *s, gx_cell_t *c) {
     c->next = NULL;
     if (s->ready_tail) s->ready_tail->next = c; else s->ready_head = c;
     s->ready_tail = c;
+    s->nready++;
 }
 
 static gx_cell_t *rq_pop(star_t *s) {
@@ -131,8 +143,52 @@ static gx_cell_t *rq_pop(star_t *s) {
         s->ready_head = c->next;
         if (!s->ready_head) s->ready_tail = NULL;
         c->next = NULL;
+        s->nready--;
     }
     return c;
+}
+
+int galaxy_load(int star) {
+    star_t *s = &stars[star];
+    return s->nready + (s->current && s->current != &s->idle);
+}
+
+void galaxy_moves(int star, uint32_t *in, uint32_t *out) {
+    *in = stars[star].moved_in;
+    *out = stars[star].moved_out;
+}
+
+/* забрать у соседки одну готовую клетку (прерывания выключены) */
+static void steal_one(int me) {
+    int victim = -1, best = galaxy_load(me) + 1;    /* брать, если там хотя бы на 2 больше */
+    for (int i = 0; i < galaxy_stars; i++)
+        if (i != me && galaxy_load(i) > best) { best = galaxy_load(i); victim = i; }
+    if (victim < 0) return;
+
+    star_t *v = &stars[victim], *s = &stars[me];
+    uint64_t now = timer_ticks;
+    gx_cell_t *c = NULL;
+    spinlock_acquire(&v->lock);
+    for (gx_cell_t **pp = &v->ready_head, *prev = NULL; *pp; prev = *pp, pp = &(*pp)->next) {
+        gx_cell_t *x = *pp;
+        if (x->pinned || now - x->moved_at < REST_MS) continue;
+        *pp = x->next;                               /* вынуть из очереди соседки */
+        if (v->ready_tail == x) v->ready_tail = prev;
+        x->next = NULL;
+        v->nready--;
+        x->star = me;                                /* теперь она вращается вокруг нас */
+        x->moved_at = now;
+        x->moves++;
+        v->moved_out++;
+        c = x;
+        break;
+    }
+    spinlock_release(&v->lock);
+    if (!c) return;
+    spinlock_acquire(&s->lock);
+    rq_push(s, c);
+    s->moved_in++;
+    spinlock_release(&s->lock);
 }
 
 /* ---------------- уборка умерших ---------------- */
@@ -172,9 +228,14 @@ static void schedule(star_t *s) {
 
 /* разбудить клетку (из любой звезды; прерывания должны быть выключены) */
 void gx_wake(gx_cell_t *c) {
-    star_t *s = &stars[c->star];
+    star_t *s;
     int woke = 0;
-    spinlock_acquire(&s->lock);
+    for (;;) {                       /* клетка могла перейти к другой звезде */
+        s = &stars[c->star];
+        spinlock_acquire(&s->lock);
+        if (&stars[c->star] == s) break;
+        spinlock_release(&s->lock);
+    }
     if (c->state == CELL_WAITING) {
         c->state = CELL_READY;
         rq_push(s, c);
@@ -202,6 +263,8 @@ void galaxy_tick(int star) {
             else pp = &c->next_sleep;
         }
     }
+    if (galaxy_stars > 1 && (timer_ticks + (uint32_t)star * 3) % BALANCE_MS == 0)
+        steal_one(star);             /* звёзды смотрят по сторонам в разное время */
     gx_cell_t *cur = s->current;
     if (cur == &s->idle) return;
     cur->ticks++;
@@ -283,6 +346,7 @@ gx_cell_t *cell_new(const char *name, void (*entry)(void *), void *arg,
     for (int k = 0; k < GX_NAME_LEN - 1 && name[k]; k++) c->name[k] = name[k];
     c->orbit = orbit;
     c->star = star;
+    c->pinned = (orbit == ORBIT_DRIVER);   /* драйвер живёт рядом со своим железом */
     c->ration = ration ? ration : 10;
     c->heap_quota = heap_quota;
     c->slot = slot_area + (uint32_t)i * GX_SLOT_SIZE;
@@ -300,6 +364,8 @@ gx_cell_t *cell_new(const char *name, void (*entry)(void *), void *arg,
     c->state = CELL_WAITING;      /* ждёт cell_start: сначала выдаём ключи */
     return c;
 }
+
+void cell_pin(gx_cell_t *c) { c->pinned = 1; }
 
 void cell_start(gx_cell_t *c) {
     uint32_t f = irq_save();
