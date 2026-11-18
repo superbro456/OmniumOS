@@ -3,14 +3,26 @@
 #include "lapic.h"
 #include "smp.h"
 #include "kernel_utils.h"
-#include "process_core.h"
+#include "galaxy.h"
 
 /* ---------------- GDT ---------------- */
-static uint64_t gdt[3] = {
+/* 0..2 — общие сегменты, дальше по одному сегменту GS на каждое ядро CPU:
+   через него ядро за одну команду узнаёт «какая я звезда». */
+static uint64_t gdt[3 + SMP_MAX_CPUS] = {
     0,
     0x00CF9A000000FFFFULL,   /* 0x08: код ядра, 0..4 ГБ */
     0x00CF92000000FFFFULL,   /* 0x10: данные ядра, 0..4 ГБ */
 };
+
+void gdt_set_percpu(int index, uint32_t base, uint32_t size) {
+    uint64_t lim = size - 1;
+    uint64_t d = (lim & 0xFFFF) | ((uint64_t)(base & 0xFFFFFF) << 16) |
+                 ((uint64_t)0x92 << 40) | (((lim >> 16) & 0xF) << 48) |
+                 ((uint64_t)0x4 << 52) | ((uint64_t)(base >> 24) << 56);
+    gdt[3 + index] = d;
+    uint16_t sel = (uint16_t)((3 + index) * 8);
+    __asm__ volatile("mov %0, %%gs" : : "r"(sel) : "memory");
+}
 
 static struct __attribute__((packed)) { uint16_t limit; uint32_t base; } gdtr;
 
@@ -35,7 +47,7 @@ static struct __attribute__((packed)) { uint16_t limit; uint32_t base; } idtr;
 #define X(n) extern void isr##n(void);
 X(0) X(1) X(2) X(3) X(4) X(5) X(6) X(7) X(8) X(9) X(10) X(11) X(12) X(13)
 X(14) X(15) X(16) X(17) X(18) X(19) X(20) X(21) X(22) X(23) X(24) X(25)
-X(26) X(27) X(28) X(29) X(30) X(31) X(32) X(39) X(64) X(255)
+X(26) X(27) X(28) X(29) X(30) X(31) X(32) X(39) X(64) X(65) X(255)
 #undef X
 
 static void idt_set(int n, void (*handler)(void)) {
@@ -57,6 +69,7 @@ void idt_init(void) {
     idt_set(IRQ_TIMER_VECTOR, isr32);
     idt_set(39, isr39);
     idt_set(IPI_TICK_VECTOR, isr64);
+    idt_set(IPI_WAKE_VECTOR, isr65);
     idt_set(255, isr255);
     idtr.limit = sizeof(idt) - 1;
     idtr.base = (uint32_t)(uintptr_t)idt;
@@ -98,6 +111,8 @@ static const char* const exc_names[32] = {
 
 void isr_dispatch(isr_frame_t* f) {
     if (f->vector < 32) {
+        /* упала клетка — убираем только её, ядро живёт дальше */
+        if (galaxy_handle_fault(f->vector, exc_names[f->vector])) return;
         char buf[12];
         kprint("\n[CPU EXCEPTION] ");
         kprint(exc_names[f->vector]);
@@ -116,11 +131,17 @@ void isr_dispatch(isr_frame_t* f) {
         outb(0x20, 0x20);                    /* EOI для PIC */
         /* будим остальные ядра, чтобы они тоже проверили свою работу */
         lapic_send_ipi_all_others(IPI_TICK_VECTOR);
-        scheduler_tick(0, timer_ticks * (1000000000ULL / TIMER_HZ));
+        galaxy_tick(0);
         return;
     }
 
     if (f->vector == IPI_TICK_VECTOR) {
+        lapic_eoi();
+        galaxy_tick(galaxy_star_index());
+        return;
+    }
+
+    if (f->vector == IPI_WAKE_VECTOR) {   /* другая звезда разбудила нашу клетку */
         lapic_eoi();
         return;
     }

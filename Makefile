@@ -4,6 +4,7 @@
 #   make run      запустить в QEMU (окно + serial в терминал)
 #   make test     загрузить в QEMU без окна и проверить лог загрузки
 #   make SMP=4 run
+#   make CROSS= galaxy   проверки галактического ядра в QEMU (без GRUB)
 #
 # По умолчанию нужен кросс-компилятор i686-elf-gcc. На Linux можно
 # собрать обычным gcc:  make CROSS=
@@ -34,7 +35,7 @@ CFLAGS = -Wall -Wextra -std=gnu11 -ffreestanding -m32 -O2 -g \
 LDFLAGS = -T linker.ld -nostdlib -m elf_i386
 
 # --- SMP / QEMU settings ---
-SMP ?= 2
+SMP ?= 4
 MEM ?= 256M
 TEST_TIMEOUT ?= 15
 
@@ -53,7 +54,10 @@ KERNEL_C_SRC = \
     kernel/ai_core.c \
     kernel/spinlock.c \
     kernel/kernel_utils.c \
-    kernel/kernel_string.c
+    kernel/kernel_string.c \
+    kernel/galaxy/star.c \
+    kernel/galaxy/chan.c \
+    kernel/galaxy/demo.c
 
 IPC_SRC = ipc/flexipc.c
 
@@ -67,7 +71,7 @@ USER_SRC = \
     user/init.c \
     user/shell.c
 
-ASM_OBJS = boot/boot.o kernel/arch/isr.o kernel/ap_blob.o
+ASM_OBJS = boot/boot.o kernel/arch/isr.o kernel/ap_blob.o kernel/galaxy/switch.o
 
 # --- Objects ---
 C_OBJS = $(KERNEL_C_SRC:.c=.o) \
@@ -91,6 +95,9 @@ boot/boot.o: boot/boot.asm
 	$(NASM) -f elf32 $< -o $@
 
 kernel/arch/isr.o: kernel/arch/isr.asm
+	$(NASM) -f elf32 $< -o $@
+
+kernel/galaxy/switch.o: kernel/galaxy/switch.asm
 	$(NASM) -f elf32 $< -o $@
 
 # trampoline для AP: плоский бинарник для адреса 0x7000, встраивается в ядро
@@ -126,6 +133,20 @@ clean:
 	rm -rf isodir
 
 .PHONY: all clean run test
+
+# Галактика без ISO и GRUB: QEMU сам грузит kernel.elf (Multiboot).
+# Ядро запускает все проверки; тест падает, если хоть одна FAILED.
+galaxy: $(TARGET)
+	rm -f serial.log
+	-timeout 60 $(QEMU) -kernel $(TARGET) -m $(MEM) -smp $(SMP) \
+	    -display none -serial file:serial.log -no-reboot \
+	    -device isa-debug-exit,iobase=0xf4,iosize=0x04
+	@grep -E "Galaxy|Check|Measure|crashed" serial.log
+	@grep -q "\[Galaxy\] All checks done" serial.log
+	@! grep -q "FAILED\|PANIC" serial.log
+	@echo "=== OmniumOS galaxy test PASSED ==="
+
+.PHONY: galaxy
 
 # Проверка логики ядра на обычном компьютере (планировщик)
 HOSTCC ?= gcc
