@@ -13,9 +13,11 @@ typedef struct {
 
 #define IRQ_TIMER_VECTOR  32
 #define IPI_TICK_VECTOR   64
-#define TIMER_HZ          100
+#define IPI_WAKE_VECTOR   65
+#define TIMER_HZ          1000
 
 void gdt_init(void);        /* общая для всех ядер GDT */
+void gdt_set_percpu(int index, uint32_t base, uint32_t size); /* свой GS у ядра CPU */
 void idt_init(void);        /* строит IDT (один раз, на BSP) */
 void idt_load(void);        /* загружает IDT на текущем ядре */
 void pic_init(void);        /* переносит IRQ 0..15 на векторы 32..47 */

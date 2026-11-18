@@ -20,6 +20,7 @@
 #include "arch.h"
 #include "lapic.h"
 #include "multiboot.h"
+#include "galaxy.h"
 
 // Заголовок Multiboot теперь в boot/boot.asm, точка входа _start.
 
@@ -47,20 +48,15 @@ static void print_num(const char* before, uint32_t v, const char* after) {
     kprint(after);
 }
 
-static void run_plants(void) {
-    flexipc_msg_t msg;
-    while (flexipc_receive(&msg)) {
-        switch (msg.dst) {
-            case 1: plant1_command(msg.cmd, msg.payload); break;
-            case 2: plant2_command(msg.cmd, msg.payload); break;
-            case 3: plant3_command(msg.cmd, msg.payload); break;
-            case 4: plant4_command(msg.cmd, msg.payload); break;
-        }
+// Часы: клетка, которая спит и раз в секунду (потом раз в минуту) пишет время.
+static void uptime_cell(void* arg) {
+    (void)arg;
+    uint32_t next_report = 1;
+    for (;;) {
+        cell_sleep_ms(next_report * 1000u - (uint32_t)gx_now_ms());
+        print_num("[Timer] uptime ", next_report, " s\n");
+        next_report = next_report < 3 ? next_report + 1 : next_report + 60;
     }
-    plant1_update();
-    plant2_update();
-    plant3_update();
-    plant4_update();
 }
 
 // ---------------- AP main ----------------
@@ -74,12 +70,9 @@ void ap_entry(uint32_t index) {
     print_num("AP ", index, " started (APIC ID ");
     print_num("", cpu_id(), ").\n");
 
+    galaxy_set_star(cpu_id(), (int)index);
     while (!system_initialized) __asm__ volatile("pause");
-    cpu_sti();
-    for (;;) {
-        run_plants();
-        cpu_halt();          // проснётся от IPI-тика BSP
-    }
+    galaxy_star_enter((int)index);   // ядро CPU становится звездой и больше не возвращается
 }
 
 // ---------------- BSP helpers ----------------
@@ -146,20 +139,16 @@ void kernel_main(uint32_t magic, multiboot_info_t* mbi) {
     security_check_syscall(1, test_pid);  // запрещён → карантин
 
     // ---------------- Start APs ----------------
+    galaxy_init();
     start_all_aps();
     lapic_mark_ready();
     system_initialized = 1;
 
-    // ---------------- Main loop BSP ----------------
-    cpu_sti();   // без этого hlt никогда не проснётся
-    uint32_t next_report = 1;
-    for (;;) {
-        run_plants();
-        uint32_t secs = (uint32_t)(timer_ticks / TIMER_HZ);
-        if (secs >= next_report) {     // 1, 2, 3 с, потом раз в минуту
-            print_num("[Timer] uptime ", secs, " s\n");
-            next_report = secs < 3 ? secs + 1 : secs + 60;
-        }
-        cpu_halt();
-    }
+    // ---------------- Galaxy ----------------
+    // Каждое ядро CPU — звезда. Первая клетка — смотритель с проверками.
+    while (galaxy_stars < (int)smp_cpus_online - 1) __asm__ volatile("pause");
+    cpu_sti();
+    cell_start(cell_new("uptime", uptime_cell, NULL, 0, ORBIT_SERVICE, 1, 0));
+    cell_start(cell_new("supervisor", galaxy_demo, NULL, 0, ORBIT_SERVICE, 10, 0));
+    galaxy_star_enter(0);
 }

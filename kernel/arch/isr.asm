@@ -34,6 +34,7 @@ isr%1:
 ISR_NOERR 32      ; IRQ0 таймер PIT
 ISR_NOERR 39      ; IRQ7 ложное от PIC
 ISR_NOERR 64      ; IPI «тик» для AP
+ISR_NOERR 65      ; IPI «разбудить» от другой звезды
 ISR_NOERR 255     ; ложное от LAPIC
 
 isr_common:
