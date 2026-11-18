@@ -68,6 +68,8 @@ static inline void irq_restore(uint32_t f) {
     if (f & 0x200) __asm__ volatile("sti" : : : "memory");
 }
 
+static void note_cache_group(int star, uint32_t apic_id);
+
 /* ---------------- номер звезды ---------------- */
 /* вызывается на самом ядре CPU: запоминает APIC ID и ставит свой GS */
 void galaxy_set_star(uint32_t apic_id, int star) {
@@ -75,6 +77,7 @@ void galaxy_set_star(uint32_t apic_id, int star) {
     stars[star].apic_id = apic_id;
     star_no[star] = star;
     gdt_set_percpu(star, (uint32_t)(uintptr_t)&star_no[star], sizeof(int));
+    note_cache_group(star, apic_id);
 }
 
 /* номер звезды лежит по адресу gs:0 — одна команда, без чтения LAPIC */
@@ -159,64 +162,135 @@ void galaxy_moves(int star, uint32_t *in, uint32_t *out) {
 }
 
 /* забрать у соседки одну готовую клетку (прерывания выключены) */
-/* соседки звезды: не больше 4.
-   Звёзды собраны в связки по 4 (на железе это ядра с общим кэшем).
-   Внутри связки все знают всех. Крайние звёзды связок держат мостик к
-   соседней связке: звезда 3 <-> 4, 7 <-> 8, ... и последняя <-> первая.
-   Так у каждой звезды 3 соседки по связке и максимум 1 мостик.
-   Клетки сначала выравниваются внутри связки, а через мостики плавно
-   перетекают в другие связки. */
-#define MAX_NEIGHBOURS 4
-#define BUNDLE         4
-static int neighbours(int me, int out[MAX_NEIGHBOURS]) {
-    int n = 0, N = galaxy_stars;
-    int first = me / BUNDLE * BUNDLE, last = first + BUNDLE - 1;
-    if (last >= N) last = N - 1;
-    for (int x = first; x <= last; x++) if (x != me) out[n++] = x;
-    int bridge = -1;
-    if (N > BUNDLE) {
-        if (me == last)  bridge = (last + 1) % N;                 /* к следующей связке */
-        if (me == first) bridge = first ? first - 1 : N - 1;      /* к предыдущей */
+/* ---------------- связки по кэшу ----------------
+ * Связка — звёзды, у которых общий кэш (обычно L3). Внутри связки клетка
+ * переходит без потери кэша, поэтому там все видят всех напрямую.
+ * Между связками переход дороже: его делают только крайние, связочные
+ * звёзды, через мостик. На ноутбуке с одним общим L3 выйдет одна связка
+ * и ни одного мостика.
+ * Каждое ядро CPU само спрашивает CPUID: «сколько ядер делят мой
+ * старший кэш». Номер группы = APIC ID >> (сколько бит на это число). */
+#define MAX_BUNDLE 16
+static uint32_t cache_group[GX_MAX_STARS];
+static int bundle_of[GX_MAX_STARS];
+static int bundle_members[GX_MAX_STARS][MAX_BUNDLE];
+static int bundle_size[GX_MAX_STARS];
+static int nbundles;
+static volatile int topo_ready;
+static const char *topo_how = "no CPUID cache info, one bundle";
+static uint32_t topo_share;
+
+static void cpuid(uint32_t leaf, uint32_t sub, uint32_t r[4]) {
+    __asm__ volatile("cpuid" : "=a"(r[0]), "=b"(r[1]), "=c"(r[2]), "=d"(r[3]) : "a"(leaf), "c"(sub));
+}
+
+/* сколько логических ядер делят старший кэш (0 — не знаем) */
+static uint32_t shared_by(void) {
+    uint32_t r[4], best = 0, best_level = 0;
+    cpuid(0, 0, r);
+    uint32_t max_basic = r[0];
+    int amd = (r[1] == 0x68747541);              /* "Auth" — AuthenticAMD */
+    uint32_t leaf = 0;
+    if (!amd && max_basic >= 4) leaf = 4;
+    if (amd) { cpuid(0x80000000u, 0, r); if (r[0] >= 0x8000001Du) leaf = 0x8000001Du; }
+    if (!leaf) {
+        /* о кэше молчит — считаем, что общий кэш у всего корпуса (сокета) */
+        cpuid(1, 0, r);
+        if (!(r[3] & (1u << 28))) return 0;
+        topo_how = "CPUID: no cache leaf, package of";
+        return (r[1] >> 16) & 0xFF;
     }
-    if (bridge >= 0 && n < MAX_NEIGHBOURS) {
-        int dup = (bridge == me);
-        for (int j = 0; j < n; j++) dup |= (out[j] == bridge);
-        if (!dup) out[n++] = bridge;
+    for (uint32_t i = 0; i < 8; i++) {
+        cpuid(leaf, i, r);
+        uint32_t type = r[0] & 0x1F, level = (r[0] >> 5) & 7;
+        if (!type) break;
+        if (level >= best_level) { best_level = level; best = ((r[0] >> 14) & 0xFFF) + 1; }
+    }
+    if (best) topo_how = best_level == 3 ? "CPUID: L3 shared by" : "CPUID: L2 shared by";
+    return best;
+}
+
+/* вызывается на каждом ядре CPU про себя */
+static void note_cache_group(int star, uint32_t apic_id) {
+    uint32_t n = shared_by(), bits = 0;
+    while ((1u << bits) < n) bits++;
+    if (n) topo_share = n;
+    cache_group[star] = n ? apic_id >> bits : 0;
+}
+
+/* все звёзды записали свою группу — строим связки (на BSP, один раз) */
+void galaxy_build_bundles(int nstars) {
+    nbundles = 0;
+    for (int st = 0; st < nstars; st++) {
+        int b;
+        for (b = 0; b < nbundles; b++)
+            if (cache_group[bundle_members[b][0]] == cache_group[st] && bundle_size[b] < MAX_BUNDLE) break;
+        if (b == nbundles) { bundle_size[b] = 0; nbundles++; }
+        bundle_members[b][bundle_size[b]++] = st;
+        bundle_of[st] = b;
+    }
+    topo_ready = 1;
+    gx_printf("[Galaxy] %s %u -> %d bundle(s):", topo_how, topo_share, nbundles);
+    for (int b = 0; b < nbundles; b++) {
+        gx_printf(" {");
+        for (int i = 0; i < bundle_size[b]; i++) gx_printf(i ? " %d" : "%d", bundle_members[b][i]);
+        gx_printf("}");
+    }
+    gx_printf("\n");
+}
+
+int galaxy_bundles(void) { return nbundles; }
+
+/* соседки: все звёзды своей связки + мостики. Мостик есть у первой звезды
+   связки (к последней звезде предыдущей связки) и у последней (к первой
+   звезде следующей). Связки замкнуты в кольцо. */
+#define MAX_NEIGHBOURS (MAX_BUNDLE + 2)
+static int neighbours(int me, int out[MAX_NEIGHBOURS], int *bridges, int nbr[2]) {
+    int b = bundle_of[me], n = 0;
+    *bridges = 0;
+    for (int i = 0; i < bundle_size[b]; i++)
+        if (bundle_members[b][i] != me) out[n++] = bundle_members[b][i];
+    if (nbundles > 1) {
+        int prev = (b + nbundles - 1) % nbundles, next = (b + 1) % nbundles;
+        if (bundle_members[b][0] == me)
+            nbr[(*bridges)++] = bundle_members[prev][bundle_size[prev] - 1];
+        if (bundle_members[b][bundle_size[b] - 1] == me) {
+            int x = bundle_members[next][0];
+            if (!*bridges || nbr[0] != x) nbr[(*bridges)++] = x;
+        }
     }
     return n;
 }
 
-/* сумма загрузки связки, в которой живёт звезда x, и её размер */
 static int bundle_load(int x, int *size) {
-    int first = x / BUNDLE * BUNDLE, last = first + BUNDLE - 1, sum = 0;
-    if (last >= galaxy_stars) last = galaxy_stars - 1;
-    for (int i = first; i <= last; i++) sum += galaxy_load(i);
-    *size = last - first + 1;
+    int b = bundle_of[x], sum = 0;
+    for (int i = 0; i < bundle_size[b]; i++) sum += galaxy_load(bundle_members[b][i]);
+    *size = bundle_size[b];
     return sum;
 }
 
 static int steal_from(int me, int victim);
 
 static void steal_one(int me) {
-    int nb[MAX_NEIGHBOURS], cnt = neighbours(me, nb);
+    if (!topo_ready) return;
+    int nb[MAX_NEIGHBOURS], br[2], nbridges;
+    int cnt = neighbours(me, nb, &nbridges, br);
     int victim = -1, best = galaxy_load(me) + 1;    /* брать, если там хотя бы на 2 больше */
-    int bridge = -1;
-    for (int k = 0; k < cnt; k++) {
-        if (nb[k] / BUNDLE != me / BUNDLE) { bridge = nb[k]; continue; }   /* мостик — отдельно */
+    for (int k = 0; k < cnt; k++)
         if (galaxy_load(nb[k]) > best) { best = galaxy_load(nb[k]); victim = nb[k]; }
-    }
     if (victim >= 0 && steal_from(me, victim)) return;
 
     /* Связочная звезда работает как все, но ещё сравнивает связки целиком.
        Если соседняя связка в среднем загружена больше, забираем одну клетку
        через мостик, а внутри своей связки она дальше разойдётся сама. */
-    if (bridge >= 0) {
-        int my_n, other_n;
-        int my_sum = bundle_load(me, &my_n), other_sum = bundle_load(bridge, &other_n);
-        if (other_sum * my_n - my_sum * other_n >= 2 * other_n)
-            steal_from(me, bridge);
+    int my_n, my_sum = bundle_load(me, &my_n);
+    for (int k = 0; k < nbridges; k++) {
+        int other_n, other_sum = bundle_load(br[k], &other_n);
+        if (other_sum * my_n - my_sum * other_n >= 2 * other_n && steal_from(me, br[k])) return;
     }
 }
+
+
 
 static int steal_from(int me, int victim) {
     star_t *v = &stars[victim], *s = &stars[me];

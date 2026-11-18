@@ -21,6 +21,7 @@
 #include "lapic.h"
 #include "multiboot.h"
 #include "galaxy.h"
+#include "acpi.h"
 
 // Заголовок Multiboot теперь в boot/boot.asm, точка входа _start.
 
@@ -78,9 +79,17 @@ void ap_entry(uint32_t index) {
 // ---------------- BSP helpers ----------------
 void start_all_aps(void) {
     uint32_t bsp_id = cpu_id();
-    uint32_t cpu_count = get_cpu_count();
+    uint32_t ids[SMP_MAX_CPUS];
+    int count = acpi_cpu_list(ids, SMP_MAX_CPUS);
+    if (count == 0) {                       // нет ACPI — по старинке, из CPUID
+        count = (int)get_cpu_count();
+        for (int i = 0; i < count; i++) ids[i] = (uint32_t)i;
+    } else {
+        print_num("[SMP] ACPI MADT lists ", (uint32_t)count, " CPUs\n");
+    }
     uint32_t index = 1;
-    for (uint32_t id = 0; id < cpu_count; id++) {
+    for (int i = 0; i < count; i++) {
+        uint32_t id = ids[i];
         if (id == bsp_id) continue;
         if (start_ap(id, index)) index++;
         else print_num("[SMP] CPU ", id, " did not respond\n");
@@ -147,6 +156,7 @@ void kernel_main(uint32_t magic, multiboot_info_t* mbi) {
     // ---------------- Galaxy ----------------
     // Каждое ядро CPU — звезда. Первая клетка — смотритель с проверками.
     while (galaxy_stars < (int)smp_cpus_online - 1) __asm__ volatile("pause");
+    galaxy_build_bundles((int)smp_cpus_online);
     cpu_sti();
     cell_start(cell_new("uptime", uptime_cell, NULL, 0, ORBIT_SERVICE, 1, 0));
     cell_start(cell_new("supervisor", galaxy_demo, NULL, 0, ORBIT_SERVICE, 10, 0));

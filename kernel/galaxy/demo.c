@@ -499,7 +499,8 @@ void galaxy_demo(void *arg) {
         for (int i = 0; i < galaxy_stars; i++) gx_printf(" %u", per[i]);
         gx_printf(", moves total %u, max per planet %u\n", total, maxm);
         check("stars share planets evenly (difference <= 1)", spread_ok, NULL);
-        check("planets move gradually, no ping-pong (<= 4 moves each)", maxm <= 4, NULL);
+        /* через каждый мостик клетка проходит один раз, плюс пара шагов внутри связок */
+        check("planets move gradually, no ping-pong", maxm <= (uint32_t)galaxy_bundles() + 3, NULL);
     }
 
     gx_printf("[Galaxy] switches per star:");

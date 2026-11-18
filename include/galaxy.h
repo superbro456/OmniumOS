@@ -118,7 +118,9 @@ int  galaxy_handle_fault(uint32_t vector, const char *what); /* 1 — упала
 int  galaxy_star_index(void);           /* номер звезды текущего ядра CPU */
 void galaxy_set_star(uint32_t apic_id, int star);
 extern volatile int galaxy_stars;       /* сколько звёзд зажглось */
-int  galaxy_load(int star);             /* сколько клеток хотят CPU на звезде */
+int  galaxy_load(int star);
+void galaxy_build_bundles(int nstars);  /* связки по общему кэшу (после старта всех ядер) */
+int  galaxy_bundles(void);             /* сколько клеток хотят CPU на звезде */
 void galaxy_moves(int star, uint32_t *in, uint32_t *out);
 
 /* ---------- клетки ---------- */
