@@ -218,7 +218,11 @@ static void client(void *p) {
         if (ch_recv(a->k2, &m) != GX_OK) break;
         if (m.value == i * 2) ok++;
         if (m.tag < 3) by[m.tag]++;
-        if (i == 1000) ch_send(a->key_report, 86, i, NULL);   /* «нагрузка идёт» */
+        if (i == 1000) {               /* «нагрузка идёт»: ждём, пока смотритель затеет замену */
+            ch_send(a->key_report, 86, i, NULL);
+            gx_msg_t go;
+            ch_recv(a->k3, &go);
+        }
     }
     ch_send(a->key_report, 82, ok, NULL);
     ch_send(a->key_report, 83, by[1], NULL);
@@ -425,6 +429,9 @@ void galaxy_demo(void *arg) {
         gx_cell_t *cl = spawn("client", client, &A[12], far2, ORBIT_APP, 10, 0);
         A[12].k1 = key_grant(cl, req, KEY_SEND, S_REQ);
         A[12].k2 = key_grant(cl, rep, KEY_RECV, S_REQ);
+        gx_chan_t *go = chan_new(S_PING);
+        A[12].k3 = key_grant(cl, go, KEY_RECV, S_PING);
+        int my_go = key_grant(me, go, KEY_SEND, S_PING);
         cell_start(cl);
 
         while (getm().tag != 86) {}     /* ждём, пока клиент разгонится */
@@ -447,6 +454,7 @@ void galaxy_demo(void *arg) {
         A[14].k3 = key_grant(v2, h_good, KEY_RECV, S_STATE);
         cell_start(v2);
         ch_send(my_req, T_SWAP, ((uint32_t)v1_good << 16) | (uint32_t)v2->id, NULL);
+        ch_send(my_go, 1, 0, NULL);     /* клиент продолжает; замена уже стоит в очереди перед его запросами */
 
         uint32_t handed = 0, ok = 0, by1 = 0, by2 = 0;
         for (int i = 0; i < 4; i++) {
@@ -476,16 +484,21 @@ void galaxy_demo(void *arg) {
         }
         int spread_ok = 0;
         for (int t = 0; t <= 300; t += 20) {
-            gx_printf("[Dance] t=%ums loads:", t);
+            /* строка целиком в один вывод, время — настоящее, от старта */
+            char line[160], *q = line;
             int mx = 0, mn = 99;
-            for (int i = 0; i < galaxy_stars; i++) {
+            for (int i = 0; i < galaxy_stars && q < line + 150; i++) {
                 int l = galaxy_load(i);
-                gx_printf(" %d", l);
+                *q++ = ' ';
+                if (l >= 10) *q++ = (char)('0' + l / 10);
+                *q++ = (char)('0' + l % 10);
                 if (l > mx) mx = l;
                 if (l < mn) mn = l;
             }
-            gx_printf("\n");
-            if (t >= 100 && mx - mn <= 1) spread_ok = 1;   /* к 300 мс должны выровняться */
+            *q = 0;
+            uint32_t real = (uint32_t)(gx_now_ms() - start);
+            gx_printf("[Dance] t=%ums loads:%s\n", real, line);
+            if (real >= 100 && real < 600 && mx - mn <= 1) spread_ok = 1;
             cell_sleep_ms(start + (uint32_t)t + 20 - (uint32_t)gx_now_ms());
         }
         uint32_t per[GX_MAX_STARS] = {0}, total = 0, maxm = 0;
