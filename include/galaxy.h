@@ -84,6 +84,9 @@ typedef struct gx_cell {
     volatile uint64_t ticks;     /* сколько мс CPU съела */
     uint64_t wake_at;            /* для cell_sleep_ms */
     struct gx_cell *next_sleep;
+    int pinned;                  /* не переходит к другим звёздам */
+    uint64_t moved_at;           /* когда последний раз перешла */
+    uint32_t moves;              /* сколько раз переходила */
     const char *death;           /* причина смерти */
     struct gx_cell *next;        /* очередь готовых */
 } gx_cell_t;
@@ -115,11 +118,14 @@ int  galaxy_handle_fault(uint32_t vector, const char *what); /* 1 — упала
 int  galaxy_star_index(void);           /* номер звезды текущего ядра CPU */
 void galaxy_set_star(uint32_t apic_id, int star);
 extern volatile int galaxy_stars;       /* сколько звёзд зажглось */
+int  galaxy_load(int star);             /* сколько клеток хотят CPU на звезде */
+void galaxy_moves(int star, uint32_t *in, uint32_t *out);
 
 /* ---------- клетки ---------- */
 gx_cell_t *cell_new(const char *name, void (*entry)(void *), void *arg,
                     int star, gx_orbit_t orbit, uint32_t ration, uint32_t heap_quota);
 void       cell_start(gx_cell_t *c);   /* клетка создаётся на паузе */
+void       cell_pin(gx_cell_t *c);     /* привязать к своей звезде */
 gx_cell_t *cell_self(void);
 void  cell_yield(void);
 void  cell_sleep_ms(uint32_t ms);       /* уснуть, не тратя CPU */

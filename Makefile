@@ -141,7 +141,7 @@ galaxy: $(TARGET)
 	-timeout 60 $(QEMU) -kernel $(TARGET) -m $(MEM) -smp $(SMP) \
 	    -display none -serial file:serial.log -no-reboot \
 	    -device isa-debug-exit,iobase=0xf4,iosize=0x04
-	@grep -E "Galaxy|Check|Measure|crashed" serial.log
+	@grep -E "Galaxy|Check|Measure|Dance|crashed" serial.log
 	@grep -q "\[Galaxy\] All checks done" serial.log
 	@! grep -q "FAILED\|PANIC" serial.log
 	@echo "=== OmniumOS galaxy test PASSED ==="

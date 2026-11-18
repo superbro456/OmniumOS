@@ -70,6 +70,7 @@ static gx_cell_t *spawn(const char *name, void (*f)(void *), args_t *a, int star
                         uint32_t ration, uint32_t quota) {
     if (star >= galaxy_stars) star = galaxy_stars - 1;
     gx_cell_t *c = cell_new(name, f, a, star, orbit, ration, quota);
+    cell_pin(c);    /* проверкам 1–8 важно, на какой звезде живёт клетка */
     a->key_report = key_grant(c, report, KEY_SEND, S_REPORT);
     return c;
 }
@@ -262,6 +263,15 @@ static void service(void *p) {
     }
 }
 
+/* ---------------- 9. танец звёзд ---------------- */
+static void planet(void *p) {
+    args_t *a = p;
+    volatile uint32_t work = 0;
+    while (gx_now_ms() < a->until) work++;
+    gx_cell_t *me = cell_self();
+    ch_send(a->key_report, 9, ((uint32_t)me->star << 16) | me->moves, NULL);
+}
+
 /* ---------------- смотритель ---------------- */
 static int rk;   /* ключ смотрителя на чтение отчётов */
 
@@ -354,8 +364,10 @@ void galaxy_demo(void *arg) {
         A[7].k1 = key_grant(f2, ch2, KEY_RECV, S_PING);
         gx_cell_t *b1 = cell_new("bad-div", bad_div, NULL, far, ORBIT_KUIPER, 10, 0);
         key_grant(b1, ch, KEY_SEND, S_PING);
+        cell_pin(b1);
         gx_cell_t *b2 = cell_new("bad-opcode", bad_opcode, NULL, far, ORBIT_KUIPER, 10, 0);
         key_grant(b2, ch2, KEY_SEND, S_PING);
+        cell_pin(b2);
         cell_start(f1); cell_start(f2); cell_start(b1); cell_start(b2);
         uint32_t r1 = get(), r2 = get(), r3 = get();
         int closed = 0, alive = 0;
@@ -448,6 +460,46 @@ void galaxy_demo(void *arg) {
                   A[12].n, ok, by1, by2, handed);
         check("hot swap loses no requests", ok == A[12].n && by1 + by2 == A[12].n && by2 > 0, NULL);
         check("new version got old state", handed == by1, NULL);
+    }
+
+    /* 9. танец: 8 занятых планет рождаются на одной звезде и расходятся сами */
+    if (galaxy_stars > 1) {
+        enum { P = 8 };
+        static args_t pa[P];
+        uint64_t start = gx_now_ms();
+        for (int i = 0; i < P; i++) {
+            kmemset(&pa[i], 0, sizeof(args_t));
+            pa[i].until = start + 600;
+            gx_cell_t *c = cell_new("planet", planet, &pa[i], far, ORBIT_APP, 10, 0);
+            pa[i].key_report = key_grant(c, report, KEY_SEND, S_REPORT);
+            cell_start(c);
+        }
+        int spread_ok = 0;
+        for (int t = 0; t <= 200; t += 20) {
+            gx_printf("[Dance] t=%ums loads:", t);
+            int mx = 0, mn = 99;
+            for (int i = 0; i < galaxy_stars; i++) {
+                int l = galaxy_load(i);
+                gx_printf(" %d", l);
+                if (l > mx) mx = l;
+                if (l < mn) mn = l;
+            }
+            gx_printf("\n");
+            if (t >= 100 && mx - mn <= 1) spread_ok = 1;
+            cell_sleep_ms(start + (uint32_t)t + 20 - (uint32_t)gx_now_ms());
+        }
+        uint32_t per[GX_MAX_STARS] = {0}, total = 0, maxm = 0;
+        for (int i = 0; i < P; i++) {
+            uint32_t v = get();
+            per[(v >> 16) % GX_MAX_STARS]++;
+            total += v & 0xFFFF;
+            if ((v & 0xFFFF) > maxm) maxm = v & 0xFFFF;
+        }
+        gx_printf("[Dance] planets per star at the end:");
+        for (int i = 0; i < galaxy_stars; i++) gx_printf(" %u", per[i]);
+        gx_printf(", moves total %u, max per planet %u\n", total, maxm);
+        check("stars share planets evenly (difference <= 1)", spread_ok, NULL);
+        check("planets move gradually, no ping-pong (<= 3 moves each)", maxm <= 3, NULL);
     }
 
     gx_printf("[Galaxy] switches per star:");
