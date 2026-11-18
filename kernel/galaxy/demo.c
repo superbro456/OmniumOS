@@ -87,9 +87,9 @@ static void busy(void *p) {
 static void pinger(void *p) {
     args_t *a = p;
     gx_msg_t m;
-    for (int i = 0; i < 100; i++) { ch_send(a->k1, 1, i, NULL); ch_recv(a->k2, &m); }  /* прогрев */
+    for (int i = 0; i < 100; i++) ch_call(a->k1, 1, i, a->k2, &m);   /* прогрев */
     uint64_t t = rdtsc();
-    for (uint32_t i = 0; i < a->n; i++) { ch_send(a->k1, 1, i, NULL); ch_recv(a->k2, &m); }
+    for (uint32_t i = 0; i < a->n; i++) ch_call(a->k1, 1, i, a->k2, &m);
     t = rdtsc() - t;
     ch_send(a->k1, 2, 0, NULL);
     ch_send(a->key_report, 2, (uint32_t)(t >> 32), NULL);
@@ -99,7 +99,9 @@ static void pinger(void *p) {
 static void ponger(void *p) {
     args_t *a = p;
     gx_msg_t m;
-    while (ch_recv(a->k1, &m) == GX_OK && m.tag == 1) ch_send(a->k2, 1, m.value, NULL);
+    if (ch_recv(a->k1, &m) != GX_OK) return;
+    /* ответить и сразу ждать следующий запрос — тоже вызов с прямой передачей */
+    while (m.tag == 1 && ch_call(a->k2, 1, m.value, a->k1, &m) == GX_OK) {}
 }
 
 static void ping_pong(int star_a, int star_b, uint32_t n, int base) {
@@ -276,6 +278,39 @@ static void planet(void *p) {
     ch_send(a->key_report, 9, ((uint32_t)me->star << 16) | me->moves, NULL);
 }
 
+/* ---------------- 10. слияние и разрыв орбит ---------------- */
+static uint32_t triple(gx_cell_t *service, uint32_t tag, uint32_t v) {
+    (void)service; (void)tag;
+    if (v == 13) { volatile int zero = 0; return v / zero; }   /* «плохой» запрос роняет обработчик */
+    return v * 3;
+}
+
+static void calc_service(void *p) {
+    args_t *a = p;
+    chan_serve(a->k1, triple);
+}
+
+static void calc_client(void *p) {
+    args_t *a = p;
+    enum { N = 20000 };
+    uint32_t ans, ok = 0;
+    gx_msg_t go;
+    for (int i = 0; i < 100; i++) ch_call_fn(a->k1, 0, i % 10, &ans);   /* прогрев (без 13) */
+    uint64_t t = rdtsc();
+    for (uint32_t i = 0; i < N; i++) { ch_call_fn(a->k1, 0, i % 10, &ans); ok += ans == (i % 10) * 3; }
+    uint64_t apart = rdtsc() - t;
+    ch_send(a->key_report, 101, (uint32_t)div64(apart, 1), NULL);       /* младшие 32 бита хватит */
+    ch_recv(a->k2, &go);                                              /* смотритель сливает орбиты */
+    t = rdtsc();
+    for (uint32_t i = 0; i < N; i++) { ch_call_fn(a->k1, 0, i % 10, &ans); ok += ans == (i % 10) * 3; }
+    uint64_t merged = rdtsc() - t;
+    ch_send(a->key_report, 102, (uint32_t)merged, NULL);
+    ch_send(a->key_report, 103, ok, NULL);
+    int r1 = ch_call_fn(a->k1, 0, 13, &ans);    /* обработчик упадёт: орбита рвётся */
+    int r2 = ch_call_fn(a->k1, 0, 2, &ans);     /* сервиса больше нет */
+    ch_send(a->key_report, 104, (uint32_t)(-r1) * 10 + (uint32_t)(-r2), NULL);
+}
+
 /* ---------------- смотритель ---------------- */
 static int rk;   /* ключ смотрителя на чтение отчётов */
 
@@ -286,7 +321,7 @@ static uint32_t get(void) {
 }
 
 static gx_msg_t getm(void) {
-    gx_msg_t m = { 0, 0xFFFFFFFF, NULL };
+    gx_msg_t m = { 0, 0xFFFFFFFF, NULL, NULL };
     ch_recv(rk, &m);
     return m;
 }
@@ -514,6 +549,42 @@ void galaxy_demo(void *arg) {
         check("stars share planets evenly (difference <= 1)", spread_ok, NULL);
         /* через каждый мостик клетка проходит один раз, плюс пара шагов внутри связок */
         check("planets move gradually, no ping-pong", maxm <= (uint32_t)galaxy_bundles() + 3, NULL);
+    }
+
+    /* 10. слияние и разрыв орбит */
+    {
+        uint32_t S_CALC = gx_schema("calc{v:int}->int");
+        gx_chan_t *ch = chan_new(S_CALC), *go = chan_new(S_PING);
+        static args_t sa, ca;
+        kmemset(&sa, 0, sizeof sa); kmemset(&ca, 0, sizeof ca);
+        gx_cell_t *srv = spawn("calc", calc_service, &sa, far, ORBIT_SERVICE, 10, 0);
+        sa.k1 = key_grant(srv, ch, KEY_RECV, S_CALC);
+        gx_cell_t *cl = spawn("calc-client", calc_client, &ca, far, ORBIT_APP, 10, 0);
+        ca.k1 = key_grant(cl, ch, KEY_SEND, S_CALC);
+        ca.k2 = key_grant(cl, go, KEY_RECV, S_PING);
+        int my_go = key_grant(me, go, KEY_SEND, S_PING);
+        gx_cell_t *alien = cell_new("alien-c", NULL, NULL, far, ORBIT_KUIPER, 10, 0);
+        cell_start(srv); cell_start(cl);
+        uint32_t apart = 0, merged = 0, ok = 0, codes = 0;
+        for (int i = 0; i < 4; i++) {
+            gx_msg_t m = getm();
+            if (m.tag == 101) {
+                apart = m.value;
+                check("alien C code cannot merge with a service", orbit_merge(alien, srv) == GX_ERIGHTS, NULL);
+                orbit_merge(cl, srv);
+                ch_send(my_go, 1, 0, NULL);
+            }
+            else if (m.tag == 102) merged = m.value;
+            else if (m.tag == 103) ok = m.value;
+            else if (m.tag == 104) codes = m.value;
+        }
+        /* alien так и не запущен: вернём его слот */
+        alien->state = CELL_DEAD;
+        print_ns("service call, orbits apart (message + 2 switches, direct handoff)", apart, 20000);
+        print_ns("service call, orbits merged (plain function call)", merged, 20000);
+        check("merged and apart calls give the same answers", ok == 40000, NULL);
+        check("crash inside merged call tears the orbit, caller gets ECLOSED", codes / 10 == (uint32_t)-GX_ECLOSED, NULL);
+        check("torn service is gone, next call refused", codes % 10 == (uint32_t)-GX_ECLOSED, NULL);
     }
 
     gx_printf("[Galaxy] switches per star:");

@@ -381,6 +381,30 @@ void gx_wake(gx_cell_t *c) {
         lapic_send_ipi(s->apic_id, ICR_VECTOR(IPI_WAKE_VECTOR));
 }
 
+/* прямая передача: текущая клетка отдаёт ядро CPU получателю, который ждёт
+   на этой же звезде. Сама встаёт в начало очереди. 0 — не вышло. */
+int gx_handoff(gx_cell_t *to) {
+    int idx = galaxy_star_index();
+    star_t *s = &stars[idx];
+    gx_cell_t *me = s->current;
+    if (me == &s->idle || to->star != idx) return 0;
+    spinlock_acquire(&s->lock);
+    if (to->state != CELL_WAITING || to->star != idx) { spinlock_release(&s->lock); return 0; }
+    to->state = CELL_RUNNING;
+    me->state = CELL_READY;
+    me->next = s->ready_head;
+    s->ready_head = me;
+    if (!s->ready_tail) s->ready_tail = me;
+    s->nready++;
+    s->current = to;
+    s->credit = (int32_t)to->ration;
+    spinlock_release(&s->lock);
+    s->switches++;
+    gx_switch(&me->esp, to->esp);
+    reap(&stars[galaxy_star_index()]);
+    return 1;
+}
+
 /* текущая клетка засыпает до gx_wake (прерывания выключены, state уже WAITING) */
 void gx_block(void) {
     schedule(&stars[galaxy_star_index()]);
@@ -502,6 +526,22 @@ gx_cell_t *cell_new(const char *name, void (*entry)(void *), void *arg,
 
 void cell_pin(gx_cell_t *c) { c->pinned = 1; }
 
+/* ---------------- слияние орбит ---------------- */
+static int next_domain = 1;
+
+int orbit_merge(gx_cell_t *a, gx_cell_t *b) {
+    /* сливать можно только тех, кому доверяем: их код проверен компилятором.
+       Чужой Си (пояс Койпера) и драйверы с danger — никогда. */
+    if (a->orbit == ORBIT_KUIPER || b->orbit == ORBIT_KUIPER ||
+        a->orbit == ORBIT_DRIVER || b->orbit == ORBIT_DRIVER) return GX_ERIGHTS;
+    int d = a->domain ? a->domain : b->domain ? b->domain : __atomic_fetch_add(&next_domain, 1, __ATOMIC_SEQ_CST);
+    a->domain = d;
+    b->domain = d;
+    return GX_OK;
+}
+
+void orbit_split(gx_cell_t *c) { c->domain = 0; }
+
 void cell_start(gx_cell_t *c) {
     uint32_t f = irq_save();
     gx_wake(c);
@@ -525,12 +565,54 @@ void *cell_alloc(uint32_t size) {
 }
 
 /* ---------------- падения ---------------- */
+/* убрать клетку, которая сейчас НЕ выполняется (прерывания выключены) */
+static void cell_kill_other(gx_cell_t *t, const char *why) {
+    star_t *s;
+    for (;;) {
+        s = &stars[t->star];
+        spinlock_acquire(&s->lock);
+        if (&stars[t->star] == s) break;
+        spinlock_release(&s->lock);
+    }
+    if (t->state == CELL_READY) {                 /* вынуть из очереди */
+        for (gx_cell_t **pp = &s->ready_head, *prev = NULL; *pp; prev = *pp, pp = &(*pp)->next)
+            if (*pp == t) {
+                *pp = t->next;
+                if (s->ready_tail == t) s->ready_tail = prev;
+                s->nready--;
+                break;
+            }
+    }
+    t->state = CELL_DEAD;
+    t->death = why;
+    spinlock_release(&s->lock);
+    gx_chan_close_by(t);
+    gx_blocks_free_all(t);
+    spinlock_acquire(&s->lock);
+    t->next = s->grave;
+    s->grave = t;
+    spinlock_release(&s->lock);
+}
+
+extern void gx_throw(uint32_t *jb, int code) __attribute__((noreturn));
+
 int galaxy_handle_fault(uint32_t vector, const char *what) {
     (void)vector;
     if (!galaxy_stars) return 0;
     star_t *s = &stars[galaxy_star_index()];
     if (!s->lit || s->current == &s->idle) return 0;   /* упала сама звезда — это паника */
     gx_cell_t *c = s->current;
+    gx_cell_t *t = c->call_target;
+    if (t) {
+        /* упал обработчик сервиса внутри слитого вызова: рвём орбиту.
+           Убираем сервис, вызывающий возвращается из ch_call_fn с ошибкой. */
+        c->call_target = NULL;
+        gx_printf("[Galaxy] merged service '%s' crashed inside a call from '%s': %s. Orbit torn, caller continues.\n",
+                  t->name, c->name, what);
+        c->domain = 0;
+        cell_kill_other(t, what);
+        gx_throw(c->call_jmp, 1);
+    }
     gx_printf("[Galaxy] cell '%s' crashed: %s. Cell removed, others keep running.\n", c->name, what);
     cell_die(c, what);
     return 1;

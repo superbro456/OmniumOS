@@ -88,6 +88,9 @@ typedef struct gx_cell {
     uint64_t moved_at;           /* когда последний раз перешла */
     uint32_t moves;              /* сколько раз переходила */
     const char *death;           /* причина смерти */
+    int domain;                  /* общий номер у слитых орбит; 0 — сама по себе */
+    struct gx_cell *volatile call_target;  /* в чьём обработчике сейчас (слитый вызов) */
+    uint32_t call_jmp[6];        /* куда вернуться, если обработчик упадёт */
     struct gx_cell *next;        /* очередь готовых */
 } gx_cell_t;
 
@@ -95,7 +98,13 @@ typedef struct {
     uint32_t tag;
     uint32_t value;
     gx_block_t *block;   /* передаваемые данные (move), может быть NULL */
+    void *reply;         /* куда положить ответ (ch_call_fn), NULL — без ответа */
 } gx_msg_t;
+
+struct gx_cell;
+/* обработчик сервиса: вызывается либо в самой клетке-сервисе (по сообщению),
+   либо прямо в вызывающей клетке, если их орбиты слиты */
+typedef uint32_t (*gx_handler_t)(struct gx_cell *service, uint32_t tag, uint32_t value);
 
 typedef struct gx_chan {
     uint32_t schema;             /* хеш схемы сообщений */
@@ -107,6 +116,9 @@ typedef struct gx_chan {
     volatile int closed;         /* одна из сторон канала опустела */
     volatile int send_star;      /* звезда последнего отправителя */
     int senders, receivers;      /* сколько живых ключей на каждой стороне */
+    gx_handler_t handler;        /* если сервис отвечает функцией */
+    struct gx_cell *server;
+    struct gx_cell *volatile wait_reply;   /* кто ждёт ответа обработчика */
     spinlock_t lock;
 } gx_chan_t;
 
@@ -142,6 +154,20 @@ void key_revoke_all(gx_chan_t *ch);
 int  key_pass(int key, gx_cell_t *to);  /* отдать свой ключ другой клетке (горячая замена) */
 int  ch_send(int key, uint32_t tag, uint32_t value, gx_block_t *move);
 int  ch_recv(int key, gx_msg_t *out);
+/* отправить и ждать ответа; если получатель ждёт на этой же звезде,
+   ядро CPU переходит прямо к нему, мимо очереди (прямая передача) */
+int  ch_call(int send_key, uint32_t tag, uint32_t value, int recv_key, gx_msg_t *out);
+
+/* ---------- слияние и разрыв орбит ----------
+ * Сервис отвечает функцией-обработчиком. Пока орбиты раздельны, вызов идёт
+ * сообщением и переключением клеток. Если орбиты слиты, вызывающий просто
+ * вызывает обработчик как функцию — без переключений. Память не сливается:
+ * у каждой клетки своя куча и свои ключи. Упал обработчик в слитом вызове —
+ * орбита рвётся: сервис убирается, вызывающий получает GX_ECLOSED. */
+void chan_serve(int key, gx_handler_t h);            /* сервис: обслуживать канал (не возвращается, пока жив канал) */
+int  ch_call_fn(int key, uint32_t tag, uint32_t value, uint32_t *answer);
+int  orbit_merge(gx_cell_t *a, gx_cell_t *b);         /* только доверенные орбиты */
+void orbit_split(gx_cell_t *c);
 
 gx_block_t *block_new(uint32_t len);    /* блок в обменной куче, владелец — текущая клетка */
 void  block_free(gx_block_t *b);

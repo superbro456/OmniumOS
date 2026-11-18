@@ -14,6 +14,8 @@
 #include "kernel_string.h"
 
 void gx_wake(gx_cell_t *c);
+int  gx_handoff(gx_cell_t *to);
+extern int gx_try(uint32_t *jb);
 void gx_block(void);
 
 static inline uint32_t irq_save(void) {
@@ -181,21 +183,27 @@ void gx_chan_close_by(gx_cell_t *c) {
         if (rights & KEY_RECV) ch->receivers--;
         if (ch->senders > 0 && ch->receivers > 0) { spinlock_release(&ch->lock); continue; }
         ch->closed = 1;   /* с одной стороны никого не осталось */
-        gx_cell_t *r = ch->wait_recv, *s = ch->wait_send;
-        ch->wait_recv = ch->wait_send = NULL;
+        gx_cell_t *r = ch->wait_recv, *s = ch->wait_send, *w = ch->wait_reply;
+        ch->wait_recv = ch->wait_send = ch->wait_reply = NULL;
         spinlock_release(&ch->lock);
         if (r && r != c) gx_wake(r);
         if (s && s != c) gx_wake(s);
+        if (w && w != c) gx_wake(w);
     }
 }
+
+static int chan_put(gx_chan_t *ch, uint32_t tag, uint32_t value, gx_block_t *move, void *reply, int handoff);
 
 int ch_send(int key, uint32_t tag, uint32_t value, gx_block_t *move) {
     int err;
     gx_key_t *k = key_check(key, KEY_SEND, &err);
     if (!k) return err;
-    gx_chan_t *ch = k->chan;
+    if (move && move->owner != cell_self()) return GX_ERIGHTS;   /* отдать можно только своё */
+    return chan_put(k->chan, tag, value, move, NULL, 0);
+}
+
+static int chan_put(gx_chan_t *ch, uint32_t tag, uint32_t value, gx_block_t *move, void *reply, int handoff) {
     gx_cell_t *me = cell_self();
-    if (move && move->owner != me) return GX_ERIGHTS;   /* отдать можно только своё */
 
     uint32_t f = irq_save();
     for (;;) {
@@ -206,13 +214,15 @@ int ch_send(int key, uint32_t tag, uint32_t value, gx_block_t *move) {
             m->tag = tag;
             m->value = value;
             m->block = move;
+            m->reply = reply;
             ch->send_star = me->star;
             if (move) own_unlink(move);          /* блок в пути: ничей */
             __atomic_store_n(&ch->head, ch->head + 1, __ATOMIC_RELEASE);
             gx_cell_t *r = ch->wait_recv;
             ch->wait_recv = NULL;
             spinlock_release(&ch->lock);
-            if (r) gx_wake(r);
+            /* при вызове с ответом сразу отдаём ядро получателю, если он рядом */
+            if (r && !(handoff && gx_handoff(r))) gx_wake(r);
             irq_restore(f);
             return GX_OK;
         }
@@ -256,4 +266,84 @@ int ch_recv(int key, gx_msg_t *out) {
         spinlock_release(&ch->lock);
         gx_block();
     }
+}
+
+/* ---------------- вызов с ответом и прямой передачей ---------------- */
+int ch_call(int send_key, uint32_t tag, uint32_t value, int recv_key, gx_msg_t *out) {
+    int err;
+    gx_key_t *k = key_check(send_key, KEY_SEND, &err);
+    if (!k) return err;
+    int r = chan_put(k->chan, tag, value, NULL, NULL, 1);
+    if (r != GX_OK) return r;
+    return ch_recv(recv_key, out);
+}
+
+/* ---------------- обработчики, слияние, разрыв ---------------- */
+typedef struct {
+    volatile int done;
+    uint32_t value;
+    gx_cell_t *volatile waiter;
+} reply_slot_t;
+
+void chan_serve(int key, gx_handler_t h) {
+    gx_cell_t *me = cell_self();
+    gx_key_t *k = &me->keys[key];
+    if (key < 0 || key >= GX_MAX_KEYS || !k->chan || !(k->rights & KEY_RECV)) return;
+    gx_chan_t *ch = k->chan;
+    ch->handler = h;
+    ch->server = me;
+    gx_msg_t m;
+    while (ch_recv(key, &m) == GX_OK) {
+        uint32_t v = h(me, m.tag, m.value);
+        reply_slot_t *slot = m.reply;
+        if (!slot) continue;
+        uint32_t f = irq_save();
+        spinlock_acquire(&ch->lock);
+        slot->value = v;
+        slot->done = 1;
+        gx_cell_t *w = slot->waiter;
+        spinlock_release(&ch->lock);
+        if (w && !gx_handoff(w)) gx_wake(w);
+        irq_restore(f);
+    }
+}
+
+int ch_call_fn(int key, uint32_t tag, uint32_t value, uint32_t *answer) {
+    int err;
+    gx_key_t *k = key_check(key, KEY_SEND, &err);
+    if (!k) return err;
+    gx_chan_t *ch = k->chan;
+    gx_cell_t *me = cell_self(), *srv = ch->server;
+    if (ch->closed || (srv && (srv->state == CELL_DEAD || srv->state == CELL_FREE))) return GX_ECLOSED;
+
+    /* сервис ещё не начал обслуживать — запрос просто ляжет в очередь */
+    if (srv && ch->handler && me->domain && me->domain == srv->domain) {
+        /* орбиты слиты: обработчик выполняется прямо здесь, как функция */
+        me->call_target = srv;
+        if (gx_try(me->call_jmp) == 0) {
+            *answer = ch->handler(srv, tag, value);
+            me->call_target = NULL;
+            return GX_OK;
+        }
+        return GX_ECLOSED;          /* обработчик упал, орбита разорвана */
+    }
+
+    /* орбиты раздельны: сообщение, сервис отвечает в нашу ячейку */
+    reply_slot_t slot = { 0, 0, NULL };
+    int r = chan_put(ch, tag, value, NULL, &slot, 1);
+    if (r != GX_OK) return r;
+    uint32_t f = irq_save();
+    for (;;) {
+        spinlock_acquire(&ch->lock);
+        if (slot.done) { spinlock_release(&ch->lock); break; }
+        if (ch->closed) { spinlock_release(&ch->lock); irq_restore(f); return GX_ECLOSED; }
+        slot.waiter = me;
+        ch->wait_reply = me;
+        me->state = CELL_WAITING;
+        spinlock_release(&ch->lock);
+        gx_block();
+    }
+    irq_restore(f);
+    *answer = slot.value;
+    return GX_OK;
 }
