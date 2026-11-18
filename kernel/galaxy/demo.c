@@ -475,7 +475,7 @@ void galaxy_demo(void *arg) {
             cell_start(c);
         }
         int spread_ok = 0;
-        for (int t = 0; t <= 200; t += 20) {
+        for (int t = 0; t <= 300; t += 20) {
             gx_printf("[Dance] t=%ums loads:", t);
             int mx = 0, mn = 99;
             for (int i = 0; i < galaxy_stars; i++) {
@@ -485,7 +485,7 @@ void galaxy_demo(void *arg) {
                 if (l < mn) mn = l;
             }
             gx_printf("\n");
-            if (t >= 100 && mx - mn <= 1) spread_ok = 1;
+            if (t >= 100 && mx - mn <= 1) spread_ok = 1;   /* к 300 мс должны выровняться */
             cell_sleep_ms(start + (uint32_t)t + 20 - (uint32_t)gx_now_ms());
         }
         uint32_t per[GX_MAX_STARS] = {0}, total = 0, maxm = 0;
