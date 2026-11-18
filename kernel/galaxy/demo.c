@@ -462,10 +462,10 @@ void galaxy_demo(void *arg) {
         check("new version got old state", handed == by1, NULL);
     }
 
-    /* 9. танец: 8 занятых планет рождаются на одной звезде и расходятся сами */
+    /* 9. танец: 2N занятых планет рождаются на одной звезде и расходятся сами */
     if (galaxy_stars > 1) {
-        enum { P = 8 };
-        static args_t pa[P];
+        static args_t pa[32];
+        int P = 2 * galaxy_stars;          /* по 2 планеты на звезду */
         uint64_t start = gx_now_ms();
         for (int i = 0; i < P; i++) {
             kmemset(&pa[i], 0, sizeof(args_t));
@@ -499,7 +499,7 @@ void galaxy_demo(void *arg) {
         for (int i = 0; i < galaxy_stars; i++) gx_printf(" %u", per[i]);
         gx_printf(", moves total %u, max per planet %u\n", total, maxm);
         check("stars share planets evenly (difference <= 1)", spread_ok, NULL);
-        check("planets move gradually, no ping-pong (<= 3 moves each)", maxm <= 3, NULL);
+        check("planets move gradually, no ping-pong (<= 4 moves each)", maxm <= 4, NULL);
     }
 
     gx_printf("[Galaxy] switches per star:");

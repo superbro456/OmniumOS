@@ -35,7 +35,7 @@ typedef struct {
 } star_t;
 
 /* ---------------- танец звёзд ----------------
- * Раз в BALANCE_MS каждая звезда смотрит на загрузку остальных. Если у самой
+ * Раз в BALANCE_MS каждая звезда смотрит на загрузку соседок (до 4). Если у самой
  * тяжёлой хотя бы на 2 клетки больше, звезда забирает у неё ОДНУ готовую
  * клетку. Так планеты переходят плавно, по одной, а не толпой.
  * Только что перешедшая клетка отдыхает REST_MS: никакого пинг-понга.
@@ -159,10 +159,27 @@ void galaxy_moves(int star, uint32_t *in, uint32_t *out) {
 }
 
 /* забрать у соседки одну готовую клетку (прерывания выключены) */
+/* соседки звезды: не больше 4 (через одну и через две в каждую сторону).
+   Звезда не смотрит на всю галактику: на 64 ядрах это было бы 63 чтения
+   каждые 10 мс. Клетки идут волной от соседки к соседке. */
+#define MAX_NEIGHBOURS 4
+static int neighbours(int me, int out[MAX_NEIGHBOURS]) {
+    static const int step[MAX_NEIGHBOURS] = { 1, -1, 2, -2 };
+    int n = 0, N = galaxy_stars;
+    for (int k = 0; k < MAX_NEIGHBOURS; k++) {
+        int x = ((me + step[k]) % N + N) % N;
+        int dup = (x == me);
+        for (int j = 0; j < n; j++) dup |= (out[j] == x);
+        if (!dup) out[n++] = x;
+    }
+    return n;
+}
+
 static void steal_one(int me) {
+    int nb[MAX_NEIGHBOURS], cnt = neighbours(me, nb);
     int victim = -1, best = galaxy_load(me) + 1;    /* брать, если там хотя бы на 2 больше */
-    for (int i = 0; i < galaxy_stars; i++)
-        if (i != me && galaxy_load(i) > best) { best = galaxy_load(i); victim = i; }
+    for (int k = 0; k < cnt; k++)
+        if (galaxy_load(nb[k]) > best) { best = galaxy_load(nb[k]); victim = nb[k]; }
     if (victim < 0) return;
 
     star_t *v = &stars[victim], *s = &stars[me];
