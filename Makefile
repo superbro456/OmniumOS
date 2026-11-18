@@ -55,6 +55,7 @@ KERNEL_C_SRC = \
     kernel/spinlock.c \
     kernel/kernel_utils.c \
     kernel/kernel_string.c \
+    kernel/acpi.c \
     kernel/galaxy/star.c \
     kernel/galaxy/chan.c \
     kernel/galaxy/demo.c
@@ -136,12 +137,17 @@ clean:
 
 # Галактика без ISO и GRUB: QEMU сам грузит kernel.elf (Multiboot).
 # Ядро запускает все проверки; тест падает, если хоть одна FAILED.
+# GCPU — модель процессора для QEMU; GSMP — сколько ядер и как они собраны,
+# например GSMP=8,sockets=2,cores=4 даст две связки по 4 (у каждого сокета свой L3).
+GCPU ?= qemu32
+GSMP ?= $(SMP)
+TIMEOUT := $(shell command -v timeout || command -v gtimeout)
 galaxy: $(TARGET)
 	rm -f serial.log
-	-timeout 60 $(QEMU) -kernel $(TARGET) -m $(MEM) -smp $(SMP) \
+	-$(TIMEOUT) $(if $(TIMEOUT),60) $(QEMU) -kernel $(TARGET) -m $(MEM) -smp $(GSMP) -cpu $(GCPU) \
 	    -display none -serial file:serial.log -no-reboot \
 	    -device isa-debug-exit,iobase=0xf4,iosize=0x04
-	@grep -E "Galaxy|Check|Measure|Dance|crashed" serial.log
+	@grep -E "Galaxy|Check|Measure|Dance|crashed" serial.log || true
 	@grep -q "\[Galaxy\] All checks done" serial.log
 	@! grep -q "FAILED\|PANIC" serial.log
 	@echo "=== OmniumOS galaxy test PASSED ==="
