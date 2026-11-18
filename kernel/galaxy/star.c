@@ -35,7 +35,7 @@ typedef struct {
 } star_t;
 
 /* ---------------- танец звёзд ----------------
- * Раз в BALANCE_MS каждая звезда смотрит на загрузку остальных. Если у самой
+ * Раз в BALANCE_MS каждая звезда смотрит на загрузку соседок (до 4). Если у самой
  * тяжёлой хотя бы на 2 клетки больше, звезда забирает у неё ОДНУ готовую
  * клетку. Так планеты переходят плавно, по одной, а не толпой.
  * Только что перешедшая клетка отдыхает REST_MS: никакого пинг-понга.
@@ -159,12 +159,66 @@ void galaxy_moves(int star, uint32_t *in, uint32_t *out) {
 }
 
 /* забрать у соседки одну готовую клетку (прерывания выключены) */
-static void steal_one(int me) {
-    int victim = -1, best = galaxy_load(me) + 1;    /* брать, если там хотя бы на 2 больше */
-    for (int i = 0; i < galaxy_stars; i++)
-        if (i != me && galaxy_load(i) > best) { best = galaxy_load(i); victim = i; }
-    if (victim < 0) return;
+/* соседки звезды: не больше 4.
+   Звёзды собраны в связки по 4 (на железе это ядра с общим кэшем).
+   Внутри связки все знают всех. Крайние звёзды связок держат мостик к
+   соседней связке: звезда 3 <-> 4, 7 <-> 8, ... и последняя <-> первая.
+   Так у каждой звезды 3 соседки по связке и максимум 1 мостик.
+   Клетки сначала выравниваются внутри связки, а через мостики плавно
+   перетекают в другие связки. */
+#define MAX_NEIGHBOURS 4
+#define BUNDLE         4
+static int neighbours(int me, int out[MAX_NEIGHBOURS]) {
+    int n = 0, N = galaxy_stars;
+    int first = me / BUNDLE * BUNDLE, last = first + BUNDLE - 1;
+    if (last >= N) last = N - 1;
+    for (int x = first; x <= last; x++) if (x != me) out[n++] = x;
+    int bridge = -1;
+    if (N > BUNDLE) {
+        if (me == last)  bridge = (last + 1) % N;                 /* к следующей связке */
+        if (me == first) bridge = first ? first - 1 : N - 1;      /* к предыдущей */
+    }
+    if (bridge >= 0 && n < MAX_NEIGHBOURS) {
+        int dup = (bridge == me);
+        for (int j = 0; j < n; j++) dup |= (out[j] == bridge);
+        if (!dup) out[n++] = bridge;
+    }
+    return n;
+}
 
+/* сумма загрузки связки, в которой живёт звезда x, и её размер */
+static int bundle_load(int x, int *size) {
+    int first = x / BUNDLE * BUNDLE, last = first + BUNDLE - 1, sum = 0;
+    if (last >= galaxy_stars) last = galaxy_stars - 1;
+    for (int i = first; i <= last; i++) sum += galaxy_load(i);
+    *size = last - first + 1;
+    return sum;
+}
+
+static int steal_from(int me, int victim);
+
+static void steal_one(int me) {
+    int nb[MAX_NEIGHBOURS], cnt = neighbours(me, nb);
+    int victim = -1, best = galaxy_load(me) + 1;    /* брать, если там хотя бы на 2 больше */
+    int bridge = -1;
+    for (int k = 0; k < cnt; k++) {
+        if (nb[k] / BUNDLE != me / BUNDLE) { bridge = nb[k]; continue; }   /* мостик — отдельно */
+        if (galaxy_load(nb[k]) > best) { best = galaxy_load(nb[k]); victim = nb[k]; }
+    }
+    if (victim >= 0 && steal_from(me, victim)) return;
+
+    /* Связочная звезда работает как все, но ещё сравнивает связки целиком.
+       Если соседняя связка в среднем загружена больше, забираем одну клетку
+       через мостик, а внутри своей связки она дальше разойдётся сама. */
+    if (bridge >= 0) {
+        int my_n, other_n;
+        int my_sum = bundle_load(me, &my_n), other_sum = bundle_load(bridge, &other_n);
+        if (other_sum * my_n - my_sum * other_n >= 2 * other_n)
+            steal_from(me, bridge);
+    }
+}
+
+static int steal_from(int me, int victim) {
     star_t *v = &stars[victim], *s = &stars[me];
     uint64_t now = timer_ticks;
     gx_cell_t *c = NULL;
@@ -184,11 +238,12 @@ static void steal_one(int me) {
         break;
     }
     spinlock_release(&v->lock);
-    if (!c) return;
+    if (!c) return 0;
     spinlock_acquire(&s->lock);
     rq_push(s, c);
     s->moved_in++;
     spinlock_release(&s->lock);
+    return 1;
 }
 
 /* ---------------- уборка умерших ---------------- */
